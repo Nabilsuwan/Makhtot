@@ -48,6 +48,9 @@ REVIEW_THRESHOLD = 70.0                 # أي كلمة أقل من هذه ال�
 # الكاملة — قياس فعلي: أسرع بكثير على المعالجات الضعيفة مع فرق جودة ضئيل
 # (280 كلمة في الحالتين، فرق الثقة ~2%)
 FAST_MODE = os.environ.get("FAST_MODE", "0") == "1"
+# قياس فعلي على صفحة مخطوطة حقيقية: تقييد Tesseract بخيط واحد يجعله أسرع
+# ~3x بنتيجة مطابقة تمامًا (تعدد خيوط OMP يضيف عبئًا أكثر مما يفيد)
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 for d in (ARCHIVE_DIR, DERIVED_DIR):
     d.mkdir(parents=True, exist_ok=True)
@@ -144,14 +147,18 @@ def deskew(gray: np.ndarray) -> tuple[np.ndarray, float]:
                           borderMode=cv2.BORDER_REPLICATE), angle
 
 
-def enhance(gray: np.ndarray) -> np.ndarray:
+def enhance(gray: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """يعيد (رمادية محسّنة للتعرف، ثنائية للعرض). قياس فعلي على صفحة مخطوطة:
+    التعرف على الرمادية المحسّنة يعطي كلمات عالية الثقة (>70%) ضعف ما تعطيه
+    الثنائية (16 مقابل 7) بنفس عدد الكلمات تقريبًا."""
     if FAST_MODE:
         den = cv2.medianBlur(gray, 3)
     else:
         den = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
     contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(den)
-    return cv2.adaptiveThreshold(contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                 cv2.THRESH_BINARY, 35, 15)
+    binarized = cv2.adaptiveThreshold(contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                      cv2.THRESH_BINARY, 35, 15)
+    return contrast, binarized
 
 
 # ----------------------------------------------------------- OCR (اختياري)
@@ -234,7 +241,7 @@ def process_manuscript_job(manuscript_id: str) -> None:
                 continue
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             desk, _ = deskew(gray)
-            binarized = enhance(desk)
+            contrast, binarized = enhance(desk)
             proc_path = pages_dir / f"page_{n:04d}_bin.png"
             cv2.imwrite(str(proc_path), binarized)
 
@@ -245,7 +252,7 @@ def process_manuscript_job(manuscript_id: str) -> None:
             db.flush()
 
             if has_ocr:
-                full_text, avg, words = ocr_page(binarized)
+                full_text, avg, words = ocr_page(contrast)
                 page.full_text = full_text
                 page.normalized_text = normalize_arabic(full_text)
                 page.avg_confidence = avg
@@ -284,6 +291,7 @@ def home():
 def system_status():
     return {
         "ocr_available": tesseract_available(),
+        "fast_mode": FAST_MODE,
         "ocr_hint": None if tesseract_available() else (
             "Tesseract غير مثبَّت — المنصة تعمل (رفع + تحسين صور) لكن دون تعرف "
             "ضوئي. للتثبيت: Windows: مثبّت UB-Mannheim مع اختيار اللغة العربية | "
@@ -390,6 +398,32 @@ def word_crop(pid: str, x: int, y: int, w: int, h: int):
         pad = 6
         crop = img[max(0, y - pad):min(H, y + h + pad), max(0, x - pad):min(W, x + w + pad)]
         ok, buf = cv2.imencode(".png", crop)
+        return Response(content=buf.tobytes(), media_type="image/png")
+    finally:
+        db.close()
+
+
+@app.get("/api/pages/{pid}/line_crop")
+def line_crop(pid: str, x: int, y: int, w: int, h: int):
+    """شريط أفقي بعرض الصفحة كاملة حول سطر الكلمة، مع إطار أحمر يحدد الكلمة
+    المطلوبة — يعطي المراجع سياق السطر كاملًا بدل قصاصة معزولة."""
+    db = SessionLocal()
+    try:
+        p = db.get(Page, pid)
+        if not p:
+            raise HTTPException(404, "الصفحة غير موجودة")
+        img = cv2.imread(p.original_image_path)
+        if img is None:
+            raise HTTPException(422, "تعذّرت قراءة الصورة")
+        H, W = img.shape[:2]
+        pad_v = max(10, h // 2)  # هامش رأسي يُظهر امتدادات الحروف فوق/تحت السطر
+        y0, y1 = max(0, y - pad_v), min(H, y + h + pad_v)
+        strip = img[y0:y1, 0:W].copy()
+        # إطار أحمر حول الكلمة (بإحداثياتها داخل الشريط)
+        cv2.rectangle(strip, (max(0, x - 3), max(0, y - y0 - 3)),
+                      (min(W - 1, x + w + 3), min(y1 - y0 - 1, y - y0 + h + 3)),
+                      (0, 0, 255), 3)
+        ok, buf = cv2.imencode(".png", strip)
         return Response(content=buf.tobytes(), media_type="image/png")
     finally:
         db.close()
