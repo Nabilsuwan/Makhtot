@@ -108,9 +108,8 @@ def deskew(gray: np.ndarray) -> tuple[np.ndarray, float]:
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 200, minLineLength=100, maxLineGap=10)
     angles = []
     if lines is not None:
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            a = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+	for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            a = np.degrees(np.arctan2(int(y2) - int(y1), int(x2) - int(x1)))
             if -20 < a < 20:
                 angles.append(a)
     if not angles:
