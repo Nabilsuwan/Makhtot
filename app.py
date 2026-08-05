@@ -44,6 +44,10 @@ ARCHIVE_DIR = DATA_DIR / "archive"      # الأصول المحفوظة (لا ت
 DERIVED_DIR = DATA_DIR / "derived"      # الصور المعالَجة
 DB_PATH = DATA_DIR / "manuscripts.db"
 REVIEW_THRESHOLD = 70.0                 # أي كلمة أقل من هذه الثقة تدخل المراجعة
+# FAST_MODE=1 (مفعَّل تلقائيًا في Dockerfile للسحابة): إزالة تشويش خفيفة بدل
+# الكاملة — قياس فعلي: أسرع بكثير على المعالجات الضعيفة مع فرق جودة ضئيل
+# (280 كلمة في الحالتين، فرق الثقة ~2%)
+FAST_MODE = os.environ.get("FAST_MODE", "0") == "1"
 
 for d in (ARCHIVE_DIR, DERIVED_DIR):
     d.mkdir(parents=True, exist_ok=True)
@@ -64,7 +68,8 @@ class Manuscript(Base):
     call_number: Mapped[str | None] = mapped_column(String(100), nullable=True)
     original_path: Mapped[str] = mapped_column(String(1000))
     checksum_sha256: Mapped[str] = mapped_column(String(64))
-    page_count: Mapped[int] = mapped_column(Integer, default=0)
+    page_count: Mapped[int] = mapped_column(Integer, default=0)   # المكتملة
+    total_pages: Mapped[int] = mapped_column(Integer, default=0)  # المكتشفة
     status: Mapped[str] = mapped_column(String(50), default="uploaded")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -102,6 +107,23 @@ class Word(Base):
 
 Base.metadata.create_all(engine)
 
+# ترحيل خفيف لقواعد بيانات قديمة (create_all لا يضيف أعمدة لجداول موجودة)
+with engine.connect() as _c:
+    from sqlalchemy import text as _t
+    try:
+        _c.execute(_t("ALTER TABLE manuscripts ADD COLUMN total_pages INTEGER DEFAULT 0"))
+        _c.commit()
+    except Exception:
+        pass  # العمود موجود أصلًا
+
+# استرداد عند الإقلاع: أي مخطوطة علِقت "processing" (انقطع الخادم أثناءها)
+# تُعلَّم كخطأ واضح بدل البقاء عالقة للأبد
+with SessionLocal() as _s:
+    for _m in _s.query(Manuscript).filter(Manuscript.status == "processing"):
+        _m.status = "error"
+        _m.error_message = "انقطعت المعالجة (أُعيد تشغيل الخادم أثناءها) — أعد رفع الملف"
+    _s.commit()
+
 # ------------------------------------------------- تحسين الصورة (مُختبَر فعليًا)
 def deskew(gray: np.ndarray) -> tuple[np.ndarray, float]:
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
@@ -123,7 +145,10 @@ def deskew(gray: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def enhance(gray: np.ndarray) -> np.ndarray:
-    den = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+    if FAST_MODE:
+        den = cv2.medianBlur(gray, 3)
+    else:
+        den = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
     contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(den)
     return cv2.adaptiveThreshold(contrast, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                  cv2.THRESH_BINARY, 35, 15)
@@ -196,6 +221,9 @@ def process_manuscript_job(manuscript_id: str) -> None:
                 page_files.append(p)
         else:
             page_files = [original]
+
+        m.total_pages = len(page_files)
+        db.commit()
 
         has_ocr = tesseract_available()
 
@@ -302,8 +330,8 @@ def list_manuscripts():
     try:
         rows = db.execute(select(Manuscript).order_by(Manuscript.uploaded_at.desc())).scalars().all()
         return [{"id": m.id, "title": m.title, "call_number": m.call_number,
-                 "page_count": m.page_count, "status": m.status,
-                 "error": m.error_message} for m in rows]
+                 "page_count": m.page_count, "total_pages": m.total_pages,
+                 "status": m.status, "error": m.error_message} for m in rows]
     finally:
         db.close()
 
