@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: manuscript-platform
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/status
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
