@@ -143,7 +143,8 @@ async function loadLibrary() {
   const rows = await (await fetch("/api/manuscripts")).json();
   $("#lib-table tbody").innerHTML = rows.map(m => `
     <tr style="cursor:pointer" onclick="loadPages('${m.id}', '${m.title.replace(/'/g,"\\'")}')">
-      <td>${m.title}</td><td>${m.call_number || "—"}</td><td>${m.page_count}</td>
+      <td>${m.title}</td><td>${m.call_number || "—"}</td>
+      <td>${m.status === "processing" && m.total_pages ? m.page_count + "/" + m.total_pages : m.page_count}</td>
       <td><span class="status-pill st-${m.status}">${STATUS_AR[m.status] || m.status}</span>
       ${m.error ? `<div class="muted">${m.error}</div>` : ""}</td>
     </tr>`).join("") || `<tr><td colspan="4" class="muted">لا توجد مخطوطات بعد — ارفع أول مخطوطة من التبويب الأول.</td></tr>`;
