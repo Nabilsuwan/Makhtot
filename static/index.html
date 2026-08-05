@@ -27,7 +27,9 @@
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: right; padding: 9px 8px; border-bottom: 1px solid #eee; }
   .word-crop { border: 1px solid #ddd; border-radius: 8px; background: #fafafa; padding: 10px; text-align: center; margin: 12px 0; }
-  .word-crop img { max-width: 100%; max-height: 120px; }
+  .word-crop img { max-width: 100%; }
+  .line-strip img { width: 100%; height: auto; display: block; }
+  .word-crop img.word-zoom { height: 150px; width: auto; max-width: 100%; object-fit: contain; }
   .conf { color: #993C1D; font-size: 13px; }
   .snippet { color: #555; font-size: 14px; line-height: 1.8; }
   .hint { background: #FAEEDA; border: 1px solid #EF9F27; border-radius: 8px; padding: 12px 16px; font-size: 14px; color: #633806; margin-bottom: 16px; }
@@ -180,7 +182,18 @@ function renderReview() {
   const w = queue[qi];
   el.innerHTML = `
     <p class="muted">${w.manuscript_title} — صفحة ${w.page_number} — <span class="conf">ثقة النموذج: ${w.confidence}%</span> — (${qi+1}/${queue.length})</p>
-    <div class="word-crop"><img src="/api/pages/${w.page_id}/crop?x=${w.x}&y=${w.y}&w=${w.w}&h=${w.h}" alt="قصاصة الكلمة"></div>
+    <p class="muted">السطر كاملًا — الكلمة المطلوبة داخل الإطار الأحمر (انقر الصورة لفتحها بالحجم الكامل):</p>
+    <div class="word-crop line-strip">
+      <a href="/api/pages/${w.page_id}/line_crop?x=${w.x}&y=${w.y}&w=${w.w}&h=${w.h}" target="_blank">
+        <img src="/api/pages/${w.page_id}/line_crop?x=${w.x}&y=${w.y}&w=${w.w}&h=${w.h}" alt="سطر الكلمة كاملًا">
+      </a>
+    </div>
+    <p class="muted">الكلمة مكبَّرة:</p>
+    <div class="word-crop">
+      <a href="/api/pages/${w.page_id}/crop?x=${w.x}&y=${w.y}&w=${w.w}&h=${w.h}" target="_blank">
+        <img class="word-zoom" src="/api/pages/${w.page_id}/crop?x=${w.x}&y=${w.y}&w=${w.w}&h=${w.h}" alt="قصاصة الكلمة">
+      </a>
+    </div>
     <label>النص الصحيح كما تقرؤه في الصورة:</label>
     <input type="text" id="fix" value="${w.predicted_text.replace(/"/g,'&quot;')}" dir="rtl" style="font-size:18px">
     <button class="primary" onclick="submitFix()">حفظ والتالية</button>
