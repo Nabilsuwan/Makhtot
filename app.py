@@ -87,11 +87,31 @@ def _image_to_jpeg_b64(img, max_side: int = 1568) -> str:
     return base64.b64encode(buf.tobytes()).decode()
 
 
-def ai_ocr_page(img) -> str:
-    """يرسل صورة الصفحة لمزوّد الذكاء الاصطناعي المهيأ ويعيد النص المنسوخ."""
+def _ai_http_post(url: str, payload: dict, headers: dict) -> dict:
+    """POST مع كشف كامل لسبب أي خطأ من المزوّد + إعادة محاولة عند 429."""
     import json as _json
+    import time as _time
+    import urllib.error as _er
     import urllib.request as _rq
 
+    req = _rq.Request(url, data=_json.dumps(payload).encode(),
+                      headers=headers, method="POST")
+    for attempt in (1, 2):
+        try:
+            with _rq.urlopen(req, timeout=180) as r:
+                return _json.loads(r.read())
+        except _er.HTTPError as e:
+            body = e.read().decode(errors="replace")[:400]
+            if e.code == 429 and attempt == 1:
+                _time.sleep(35)  # حد طلبات الحصة المجانية — مهلة ثم محاولة أخيرة
+                continue
+            raise RuntimeError(f"HTTP {e.code}: {body}") from None
+        except _er.URLError as e:
+            raise RuntimeError(f"تعذّر الاتصال بالمزوّد: {e.reason}") from None
+
+
+def ai_ocr_page(img) -> str:
+    """يرسل صورة الصفحة لمزوّد الذكاء الاصطناعي المهيأ ويعيد النص المنسوخ."""
     b64 = _image_to_jpeg_b64(img)
     model = AI_OCR_MODEL or AI_OCR_DEFAULT_MODELS[AI_OCR_PROVIDER]
 
@@ -105,16 +125,10 @@ def ai_ocr_page(img) -> str:
                 {"type": "text", "text": AI_OCR_PROMPT},
             ]}],
         }
-        req = _rq.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=_json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json",
-                     "x-api-key": AI_OCR_API_KEY,
-                     "anthropic-version": "2023-06-01"},
-            method="POST",
-        )
-        with _rq.urlopen(req, timeout=180) as r:
-            data = _json.loads(r.read())
+        data = _ai_http_post(
+            "https://api.anthropic.com/v1/messages", payload,
+            {"Content-Type": "application/json", "x-api-key": AI_OCR_API_KEY,
+             "anthropic-version": "2023-06-01"})
         return "\n".join(b.get("text", "") for b in data.get("content", [])
                           if b.get("type") == "text").strip()
 
@@ -127,12 +141,12 @@ def ai_ocr_page(img) -> str:
         }
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={AI_OCR_API_KEY}")
-        req = _rq.Request(url, data=_json.dumps(payload).encode(),
-                          headers={"Content-Type": "application/json"}, method="POST")
-        with _rq.urlopen(req, timeout=180) as r:
-            data = _json.loads(r.read())
+        data = _ai_http_post(url, payload, {"Content-Type": "application/json"})
         parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        return "\n".join(p.get("text", "") for p in parts if "text" in p).strip()
+        text = "\n".join(p.get("text", "") for p in parts if "text" in p).strip()
+        if not text:
+            raise RuntimeError(f"استجابة بلا نص (ربما حُجبت): {str(data)[:300]}")
+        return text
 
     raise RuntimeError("مزوّد AI OCR غير مهيأ")
 
@@ -403,6 +417,24 @@ def system_status():
             "Linux: sudo apt install tesseract-ocr tesseract-ocr-ara"
         ),
     }
+
+
+@app.get("/api/ai_test")
+def ai_test():
+    """تشخيص من المتصفح: استدعاء AI صغير بصورة اختبار. يعيد النجاح أو سبب
+    الفشل الحرفي من المزوّد (مفتاح/نموذج/حصة/منطقة...)."""
+    if not ai_ocr_enabled():
+        return {"ok": False, "error": "AI_OCR غير مهيأ (تحقق من متغيري البيئة)"}
+    test = np.full((120, 400, 3), 255, dtype=np.uint8)
+    cv2.putText(test, "TEST 123", (30, 75), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 4)
+    model = AI_OCR_MODEL or AI_OCR_DEFAULT_MODELS[AI_OCR_PROVIDER]
+    try:
+        text = ai_ocr_page(test)
+        return {"ok": True, "provider": AI_OCR_PROVIDER, "model": model,
+                "response_sample": text[:200]}
+    except Exception as exc:
+        return {"ok": False, "provider": AI_OCR_PROVIDER, "model": model,
+                "error": str(exc)[:500]}
 
 
 @app.post("/api/manuscripts")
