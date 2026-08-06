@@ -72,11 +72,16 @@
     </div>
     <div class="card" id="pages-card" style="display:none">
       <h3 id="pages-title"></h3>
-      <table id="pages-table"><thead><tr><th>صفحة</th><th>متوسط الثقة</th><th>معاينة النص</th></tr></thead><tbody></tbody></table>
+      <table id="pages-table"><thead><tr><th>صفحة</th><th>المحرك / الثقة</th><th>معاينة النص</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card" id="text-card" style="display:none">
       <h3 id="text-title"></h3>
-      <pre class="pagetext" id="text-body"></pre>
+      <p class="muted">صورة الصفحة الأصلية (انقر لفتحها بالحجم الكامل):</p>
+      <a id="page-img-link" target="_blank"><img id="page-img" style="width:100%;border:1px solid #ddd;border-radius:8px"></a>
+      <p class="muted" style="margin-top:14px">النص المستخرج — عدّله مباشرة ثم احفظ (يُحدَّث البحث فورًا):</p>
+      <textarea id="text-body" dir="rtl" style="width:100%;min-height:280px;font-size:16px;line-height:2;padding:12px;border:1px solid #ccc;border-radius:8px;font-family:inherit"></textarea>
+      <button class="primary" onclick="savePageText()">حفظ التدقيق</button>
+      <span id="save-msg" class="muted"></span>
     </div>
   </section>
 
@@ -158,15 +163,29 @@ async function loadPages(mid, title) {
   $("#pages-title").textContent = "صفحات: " + title;
   $("#pages-table tbody").innerHTML = pages.map(p => `
     <tr style="cursor:pointer" onclick="loadText('${p.id}', ${p.page_number})">
-      <td>${p.page_number}</td><td class="conf">${p.avg_confidence}%</td>
+      <td>${p.page_number}</td>
+      <td class="conf">${p.engine && p.engine.startsWith("ai/") ? "🤖 ذكاء اصطناعي" : p.avg_confidence + "%"}</td>
       <td class="muted">${p.text_preview || "—"}</td>
     </tr>`).join("") || `<tr><td colspan="3" class="muted">لم تكتمل معالجة أي صفحة بعد.</td></tr>`;
 }
+let currentPageId = null;
 async function loadText(pid, n) {
+  currentPageId = pid;
   const d = await (await fetch(`/api/pages/${pid}/text`)).json();
   $("#text-card").style.display = "block";
-  $("#text-title").textContent = `نص الصفحة ${n} (متوسط الثقة ${d.avg_confidence.toFixed(1)}%)`;
-  $("#text-body").textContent = d.full_text || "(لا نص — تحقق من تثبيت Tesseract)";
+  const eng = d.engine && d.engine.startsWith("ai/") ? "بالذكاء الاصطناعي" : `Tesseract — ثقة ${d.avg_confidence.toFixed(1)}%`;
+  $("#text-title").textContent = `نص الصفحة ${n} (${eng})`;
+  $("#page-img").src = `/api/pages/${pid}/image`;
+  $("#page-img-link").href = `/api/pages/${pid}/image`;
+  $("#text-body").value = d.full_text || "(لا نص)";
+  $("#save-msg").textContent = "";
+}
+async function savePageText() {
+  const fd = new FormData();
+  fd.append("corrected_text", $("#text-body").value);
+  const r = await fetch(`/api/pages/${currentPageId}/text`, { method: "POST", body: fd });
+  $("#save-msg").textContent = r.ok ? " حُفظ ✓" : " فشل الحفظ";
+  loadLibrary();
 }
 
 // ---------------- المراجعة
