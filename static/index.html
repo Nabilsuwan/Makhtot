@@ -20,6 +20,8 @@
   button.primary { background: #3C3489; color: #fff; border: none; border-radius: 6px; padding: 10px 22px; font-size: 15px; cursor: pointer; margin-top: 14px; }
   button.primary:disabled { background: #aaa; cursor: default; }
   .status-pill { display: inline-block; padding: 3px 12px; border-radius: 12px; font-size: 13px; }
+  .del-btn { background: none; border: 1px solid #d9b8b8; color: #791F1F; border-radius: 6px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
+  .del-btn:hover { background: #FCEBEB; }
   .st-complete { background: #E1F5EE; color: #085041; }
   .st-processing { background: #FAEEDA; color: #633806; }
   .st-error { background: #FCEBEB; color: #791F1F; }
@@ -68,7 +70,7 @@
   <section class="tab" id="tab-library">
     <div class="card">
       <h3>المخطوطات <button onclick="loadLibrary()" style="float:left;font-size:13px">تحديث ⟳</button></h3>
-      <table id="lib-table"><thead><tr><th>العنوان</th><th>الرقم</th><th>الصفحات</th><th>الحالة</th></tr></thead><tbody></tbody></table>
+      <table id="lib-table"><thead><tr><th>العنوان</th><th>الرقم</th><th>الصفحات</th><th>الحالة</th><th></th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card" id="pages-card" style="display:none">
       <h3 id="pages-title"></h3>
@@ -154,7 +156,16 @@ async function loadLibrary() {
       <td>${m.status === "processing" && m.total_pages ? m.page_count + "/" + m.total_pages : m.page_count}</td>
       <td><span class="status-pill st-${m.status}">${STATUS_AR[m.status] || m.status}</span>
       ${m.error ? `<div class="muted">${m.error}</div>` : ""}</td>
-    </tr>`).join("") || `<tr><td colspan="4" class="muted">لا توجد مخطوطات بعد — ارفع أول مخطوطة من التبويب الأول.</td></tr>`;
+      <td><button class="del-btn" onclick="event.stopPropagation(); deleteManuscript('${m.id}', '${m.title.replace(/'/g,"\\'")}')">🗑 حذف</button></td>
+    </tr>`).join("") || `<tr><td colspan="5" class="muted">لا توجد مخطوطات بعد — ارفع أول مخطوطة من التبويب الأول.</td></tr>`;
+}
+async function deleteManuscript(mid, title) {
+  if (!confirm(`حذف "${title}" نهائيًا؟\nسيُحذف كل شيء: الملف الأصلي والنصوص والتصحيحات، ولا يمكن التراجع.`)) return;
+  const r = await fetch(`/api/manuscripts/${mid}`, { method: "DELETE" });
+  if (!r.ok) { alert("فشل الحذف"); return; }
+  $("#pages-card").style.display = "none";
+  $("#text-card").style.display = "none";
+  loadLibrary();
 }
 async function loadPages(mid, title) {
   const pages = await (await fetch(`/api/manuscripts/${mid}/pages`)).json();
