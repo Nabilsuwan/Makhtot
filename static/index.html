@@ -164,7 +164,8 @@ async function loadPages(mid, title) {
   $("#pages-table tbody").innerHTML = pages.map(p => `
     <tr style="cursor:pointer" onclick="loadText('${p.id}', ${p.page_number})">
       <td>${p.page_number}</td>
-      <td class="conf">${p.engine && p.engine.startsWith("ai/") ? "🤖 ذكاء اصطناعي" : p.avg_confidence + "%"}</td>
+      <td class="conf">${p.engine && p.engine.startsWith("ai/") ? "🤖 ذكاء اصطناعي" : p.avg_confidence + "%"}
+        ${p.engine && p.engine.includes("فشل") ? `<div style="color:#B00;font-size:12px;max-width:260px">${p.engine.replace("tesseract (","").replace(/\)$/,"")}</div>` : ""}</td>
       <td class="muted">${p.text_preview || "—"}</td>
     </tr>`).join("") || `<tr><td colspan="3" class="muted">لم تكتمل معالجة أي صفحة بعد.</td></tr>`;
 }
