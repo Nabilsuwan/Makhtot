@@ -52,6 +52,90 @@ FAST_MODE = os.environ.get("FAST_MODE", "0") == "1"
 # ~3x بنتيجة مطابقة تمامًا (تعدد خيوط OMP يضيف عبئًا أكثر مما يفيد)
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
+# ===== AI OCR: تعرف بنماذج الذكاء الاصطناعي البصرية (أدق بكثير من Tesseract
+# على المخطوطات اليدوية). يُفعَّل بضبط متغيري بيئة:
+#   AI_OCR_PROVIDER = "anthropic"  أو  "gemini"
+#   AI_OCR_API_KEY  = مفتاحك
+# اختياري: AI_OCR_MODEL لتحديد النموذج (له افتراضي مناسب لكل مزوّد)
+AI_OCR_PROVIDER = os.environ.get("AI_OCR_PROVIDER", "").strip().lower()
+AI_OCR_API_KEY = os.environ.get("AI_OCR_API_KEY", "").strip()
+AI_OCR_MODEL = os.environ.get("AI_OCR_MODEL", "").strip()
+AI_OCR_DEFAULT_MODELS = {"anthropic": "claude-haiku-4-5-20251001",
+                         "gemini": "gemini-2.5-flash"}
+
+
+def ai_ocr_enabled() -> bool:
+    return AI_OCR_PROVIDER in ("anthropic", "gemini") and bool(AI_OCR_API_KEY)
+
+
+AI_OCR_PROMPT = (
+    "هذه صورة صفحة من مخطوطة عربية قديمة. انسخ النص العربي كما هو مكتوب "
+    "تمامًا، سطرًا بسطر، بترتيب القراءة. إن كانت الصورة تعرض صفحتين متقابلتين "
+    "فانسخ الصفحة اليمنى كاملة أولًا ثم اليسرى. لا تضف أي شرح أو ترجمة أو "
+    "عناوين — أخرج النص المنسوخ فقط. إن تعذّرت قراءة كلمة ضع مكانها [؟]."
+)
+
+
+def _image_to_jpeg_b64(img, max_side: int = 1568) -> str:
+    """تصغير الصورة لحد معقول (يخفض التكلفة دون فقد مقروئية) وترميزها base64."""
+    import base64
+    h, w = img.shape[:2]
+    scale = max_side / max(h, w)
+    if scale < 1.0:
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return base64.b64encode(buf.tobytes()).decode()
+
+
+def ai_ocr_page(img) -> str:
+    """يرسل صورة الصفحة لمزوّد الذكاء الاصطناعي المهيأ ويعيد النص المنسوخ."""
+    import json as _json
+    import urllib.request as _rq
+
+    b64 = _image_to_jpeg_b64(img)
+    model = AI_OCR_MODEL or AI_OCR_DEFAULT_MODELS[AI_OCR_PROVIDER]
+
+    if AI_OCR_PROVIDER == "anthropic":
+        payload = {
+            "model": model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/jpeg", "data": b64}},
+                {"type": "text", "text": AI_OCR_PROMPT},
+            ]}],
+        }
+        req = _rq.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=_json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "x-api-key": AI_OCR_API_KEY,
+                     "anthropic-version": "2023-06-01"},
+            method="POST",
+        )
+        with _rq.urlopen(req, timeout=180) as r:
+            data = _json.loads(r.read())
+        return "\n".join(b.get("text", "") for b in data.get("content", [])
+                          if b.get("type") == "text").strip()
+
+    if AI_OCR_PROVIDER == "gemini":
+        payload = {
+            "contents": [{"parts": [
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                {"text": AI_OCR_PROMPT},
+            ]}]
+        }
+        url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent?key={AI_OCR_API_KEY}")
+        req = _rq.Request(url, data=_json.dumps(payload).encode(),
+                          headers={"Content-Type": "application/json"}, method="POST")
+        with _rq.urlopen(req, timeout=180) as r:
+            data = _json.loads(r.read())
+        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        return "\n".join(p.get("text", "") for p in parts if "text" in p).strip()
+
+    raise RuntimeError("مزوّد AI OCR غير مهيأ")
+
 for d in (ARCHIVE_DIR, DERIVED_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -89,6 +173,7 @@ class Page(Base):
     full_text: Mapped[str] = mapped_column(Text, default="")
     normalized_text: Mapped[str] = mapped_column(Text, default="")  # للبحث المرن
     avg_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    engine: Mapped[str] = mapped_column(String(30), default="tesseract")
     manuscript: Mapped[Manuscript] = relationship(back_populates="pages")
     words: Mapped[list["Word"]] = relationship(back_populates="page")
 
@@ -118,6 +203,11 @@ with engine.connect() as _c:
         _c.commit()
     except Exception:
         pass  # العمود موجود أصلًا
+    try:
+        _c.execute(_t("ALTER TABLE pages ADD COLUMN engine VARCHAR(30) DEFAULT 'tesseract'"))
+        _c.commit()
+    except Exception:
+        pass
 
 # استرداد عند الإقلاع: أي مخطوطة علِقت "processing" (انقطع الخادم أثناءها)
 # تُعلَّم كخطأ واضح بدل البقاء عالقة للأبد
@@ -251,11 +341,24 @@ def process_manuscript_job(manuscript_id: str) -> None:
             db.add(page)
             db.flush()
 
-            if has_ocr:
+            ai_done = False
+            if ai_ocr_enabled():
+                try:
+                    text_ai = ai_ocr_page(img)  # الصورة الأصلية الملونة: النماذج البصرية تقرؤها أفضل
+                    page.full_text = text_ai
+                    page.normalized_text = normalize_arabic(text_ai)
+                    page.engine = f"ai/{AI_OCR_PROVIDER}"
+                    page.avg_confidence = 0.0  # النماذج البصرية لا تعطي ثقة رقمية لكل كلمة
+                    ai_done = True
+                except Exception as ai_exc:  # مفتاح خاطئ/حصة منتهية → احتياط Tesseract
+                    page.engine = f"tesseract (فشل AI: {str(ai_exc)[:80]})"
+            if not ai_done and has_ocr:
                 full_text, avg, words = ocr_page(contrast)
                 page.full_text = full_text
                 page.normalized_text = normalize_arabic(full_text)
                 page.avg_confidence = avg
+                if not page.engine.startswith("tesseract"):
+                    page.engine = "tesseract"
                 for w in words:
                     db.add(Word(id=str(uuid.uuid4()), page_id=page.id, text=w["text"],
                                 confidence=w["confidence"], x=w["x"], y=w["y"],
@@ -292,6 +395,7 @@ def system_status():
     return {
         "ocr_available": tesseract_available(),
         "fast_mode": FAST_MODE,
+        "ai_ocr": AI_OCR_PROVIDER if ai_ocr_enabled() else "off",
         "ocr_hint": None if tesseract_available() else (
             "Tesseract غير مثبَّت — المنصة تعمل (رفع + تحسين صور) لكن دون تعرف "
             "ضوئي. للتثبيت: Windows: مثبّت UB-Mannheim مع اختيار اللغة العربية | "
@@ -352,6 +456,7 @@ def list_pages(mid: str):
                            .order_by(Page.page_number)).scalars().all()
         return [{"id": p.id, "page_number": p.page_number,
                  "avg_confidence": round(p.avg_confidence, 1),
+                 "engine": p.engine,
                  "text_preview": p.full_text[:200]} for p in pages]
     finally:
         db.close()
@@ -365,7 +470,24 @@ def page_text(pid: str):
         if not p:
             raise HTTPException(404, "الصفحة غير موجودة")
         return {"page_number": p.page_number, "avg_confidence": p.avg_confidence,
-                "full_text": p.full_text}
+                "engine": p.engine, "full_text": p.full_text}
+    finally:
+        db.close()
+
+
+@app.post("/api/pages/{pid}/text")
+def save_page_text(pid: str, corrected_text: str = Form(...)):
+    """تدقيق على مستوى الصفحة: حفظ النص المصحح كاملًا (مفيد خصوصًا مع AI OCR
+    حيث لا توجد كلمات مفردة بإحداثيات، فالمراجعة تكون نصية مقابل صورة الصفحة)."""
+    db = SessionLocal()
+    try:
+        p = db.get(Page, pid)
+        if not p:
+            raise HTTPException(404, "الصفحة غير موجودة")
+        p.full_text = corrected_text
+        p.normalized_text = normalize_arabic(corrected_text)
+        db.commit()
+        return {"status": "saved"}
     finally:
         db.close()
 
