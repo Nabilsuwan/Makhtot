@@ -64,6 +64,12 @@ AI_OCR_DEFAULT_MODELS = {"anthropic": "claude-haiku-4-5-20251001",
                          "gemini": "gemini-2.5-flash"}
 
 
+# مجموعة المخطوطات الملغاة: يضيف إليها طلب الحذف فورًا (قبل أي عملية قاعدة
+# بيانات قد تنتظر قفلًا)، ويفحصها خيط المعالجة عند كل خطوة — يغلق كل نوافذ
+# السباق الزمني بين الحذف والمعالجة الجارية
+CANCELLED_MANUSCRIPTS: set[str] = set()
+
+
 def ai_ocr_enabled() -> bool:
     return AI_OCR_PROVIDER in ("anthropic", "gemini") and bool(AI_OCR_API_KEY)
 
@@ -154,7 +160,8 @@ for d in (ARCHIVE_DIR, DERIVED_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 # ------------------------------------------------------------ قاعدة البيانات
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+engine = create_engine(f"sqlite:///{DB_PATH}",
+                       connect_args={"check_same_thread": False, "timeout": 30})
 SessionLocal = sessionmaker(bind=engine, autoflush=False)
 
 
@@ -302,6 +309,24 @@ def normalize_arabic(text: str) -> str:
 
 
 # ------------------------------------------------------- خط المعالجة الخلفي
+def _abort_cancelled(db, manuscript_id: str) -> None:
+    """تنظيف كامل عند اكتشاف الإلغاء: كل ما أضافه هذا الخيط لهذه المخطوطة."""
+    db.rollback()
+    page_ids = [p.id for p in db.query(Page).filter(Page.manuscript_id == manuscript_id)]
+    if page_ids:
+        db.query(Word).filter(Word.page_id.in_(page_ids)).delete(synchronize_session=False)
+        db.query(Page).filter(Page.manuscript_id == manuscript_id).delete(synchronize_session=False)
+        db.commit()
+    shutil.rmtree(DERIVED_DIR / manuscript_id, ignore_errors=True)
+
+
+def _cancelled(db, manuscript_id: str) -> bool:
+    if manuscript_id in CANCELLED_MANUSCRIPTS:
+        return True
+    db.expire_all()
+    return db.get(Manuscript, manuscript_id) is None
+
+
 def process_manuscript_job(manuscript_id: str) -> None:
     """يعمل في خيط خلفي: استخراج صفحات → تحسين → OCR → حفظ. مع تحديث الحالة."""
     db = SessionLocal()
@@ -340,6 +365,10 @@ def process_manuscript_job(manuscript_id: str) -> None:
 
         # 2) لكل صفحة: تحسين + OCR
         for n, pf in enumerate(page_files, start=1):
+            # فحص الإلغاء: إن حُذفت المخطوطة أثناء المعالجة نتوقف وننظف فورًا
+            if _cancelled(db, manuscript_id):
+                _abort_cancelled(db, manuscript_id)
+                return
             img = cv2.imread(str(pf))
             if img is None:
                 continue
@@ -379,7 +408,14 @@ def process_manuscript_job(manuscript_id: str) -> None:
                                 w=w["w"], h=w["h"]))
             m.page_count = n
             db.commit()  # حفظ تدريجي: التقدم مرئي أثناء المعالجة
+            if _cancelled(db, manuscript_id):
+                _abort_cancelled(db, manuscript_id)
+                return
 
+        if _cancelled(db, manuscript_id):
+            _abort_cancelled(db, manuscript_id)
+            return
+        m = db.get(Manuscript, manuscript_id)
         m.status = "complete" if has_ocr else "complete_no_ocr"
         db.commit()
     except Exception as exc:  # noqa: BLE001 — نسجل الخطأ للمستخدم بدل الانهيار الصامت
@@ -478,6 +514,33 @@ def list_manuscripts():
                  "status": m.status, "error": m.error_message} for m in rows]
     finally:
         db.close()
+
+
+@app.delete("/api/manuscripts/{mid}")
+def delete_manuscript(mid: str):
+    """حذف كامل: السجلات + الصور المشتقة + الأصل المحفوظ. إن كانت المعالجة
+    جارية فسيكتشف خيطها اختفاء المخطوطة ويتوقف تلقائيًا (انظر فحص الإلغاء
+    داخل process_manuscript_job)."""
+    CANCELLED_MANUSCRIPTS.add(mid)  # أولًا وقبل أي قفل: الخيط الجاري يرى هذا فورًا
+    db = SessionLocal()
+    try:
+        m = db.get(Manuscript, mid)
+        if not m:
+            CANCELLED_MANUSCRIPTS.discard(mid)
+            raise HTTPException(404, "المخطوطة غير موجودة")
+        page_ids = [p.id for p in db.query(Page).filter(Page.manuscript_id == mid)]
+        if page_ids:
+            db.query(Word).filter(Word.page_id.in_(page_ids)).delete(synchronize_session=False)
+            db.query(Page).filter(Page.manuscript_id == mid).delete(synchronize_session=False)
+        db.delete(m)
+        db.commit()
+    finally:
+        db.close()
+    # إزالة الملفات بعد نجاح حذف السجلات
+    shutil.rmtree(ARCHIVE_DIR / mid, ignore_errors=True)
+    shutil.rmtree(DERIVED_DIR / mid, ignore_errors=True)
+    CANCELLED_MANUSCRIPTS.discard(mid)
+    return {"status": "deleted"}
 
 
 @app.get("/api/manuscripts/{mid}/pages")
